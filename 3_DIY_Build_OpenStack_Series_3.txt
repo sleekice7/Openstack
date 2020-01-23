@@ -1,0 +1,464 @@
+
+@Controller: Installing Cinder - Block Storage Node
+====================================================
+Installing Cinder
+Database
+Create Cinder database:
+mysql
+create database cinder;
+Grant access:
+grant all privileges on cinder.* to 'cinder'@'localhost' identified by 'openstack';
+grant all privileges on cinder.* to 'cinder'@'%' identified by 'openstack';
+exit
+ 
+Setting up the Cinder user
+Source Admin Credentials
+. admin-openrc
+Create the Cinder User
+openstack user create --domain default --password-prompt cinder
+Add the Admin Role
+openstack role add --project service --user cinder admin
+ 
+Setting up the Cinder Services and Endpoints
+Create the Services
+openstack service create --name cinderv2 --description "OpenStack Block Storage" volumev2
+openstack service create --name cinderv3 --description "OpenStack Block Storage" volumev3
+Create the Endpoints
+Public/Internal/Admin
+openstack endpoint create --region RegionOne volumev2 public http://controller:8776/v2/%\(project_id\)s
+openstack endpoint create --region RegionOne volumev2 internal http://controller:8776/v2/%\(project_id\)s
+openstack endpoint create --region RegionOne volumev2 admin http://controller:8776/v2/%\(project_id\)s
+ 
+Setting up the Cinder Services and Endpoints
+Create the Endpoints
+Public/Internal/Admin
+openstack endpoint create --region RegionOne volumev3 public http://controller:8776/v3/%\(project_id\)s
+openstack endpoint create --region RegionOne volumev3 internal http://controller:8776/v3/%\(project_id\)s
+openstack endpoint create --region RegionOne volumev3 admin http://controller:8776/v3/%\(project_id\)s
+ 
+Install Components
+apt install cinder-api cinder-scheduler
+
+nano /etc/cinder/cinder.conf
+[database]
+connection = mysql+pymysql://cinder:openstack@controller/cinder
+[DEFAULT]
+transport_url = rabbit://openstack:openstack@controller
+
+[api]
+auth_strategy = keystone
+ 
+[keystone_authtoken]
+auth_uri = http://controller:5000
+auth_url = http://controller:35357
+memcached_servers = controller:11211
+auth_type = password
+project_domain_name = default
+user_domain_name = default
+project_name = service
+username = cinder
+password = openstack
+[DEFAULT]
+my_ip = 10.0.0.9
+[oslo_concurrency]
+lock_path = /var/lib/cinder/tmp
+ 
+Populate the Cinder Database
+su -s /bin/sh -c "cinder-manage db sync" cinder
+
+Finalize Installation
+service nova-api restart
+service cinder-scheduler restart
+service apache2 restart
+
+nano /etc/nova/nova.conf
+[cinder]
+os_region_name = RegionOne
+
+@BlockNode: Installing Cinder - Block Storage Node
+====================================================
+Install Components
+apt install lvm2 thin-provisioning-tools
+
+Create the LVM Physical Volume
+pvcreate /dev/sdb
+Create the LVM Volume Group
+vgcreate cinder-volumes /dev/sdb
+
+nano /etc/lvm/lvm.conf
+devices {
+...
+filter = [ "a/sdb/", "r/.*/"]
+ 
+Install Components
+apt install cinder-volume
+
+nano /etc/cinder/cinder.conf
+[database]
+connection = mysql+pymysql://cinder:openstack@controller/cinder
+[DEFAULT]
+transport_url = rabbit://openstack:openstack@controller
+auth_strategy = keystone
+my_ip = 10.0.0.11
+enabled_backends = lvm
+glance_api_servers = http://controller:9292
+
+[keystone_authtoken]
+auth_uri = http://controller:5000
+auth_url = http://controller:35357
+memcached_servers = controller:11211
+auth_type = password
+project_domain_name = default
+user_domain_name = default
+project_name = service
+username = cinder
+password = openstack
+
+[LVM]
+volume_driver = cinder.volume.drivers.lvm.LVMVolumeDriver
+volume_group = cinder-volumes
+iscsi_protocol = iscsi
+iscsi_helper = tgtadm
+ 
+[oslo_concurrency]
+lock_path = /var/lib/cinder/tmp
+
+Finalize Installation
+service tgt restart
+service cinder-volume restart
+ 
+Verifying Installation
+Source Admin Credentials
+. admin-openrc
+
+List Cinder Services
+openstack volume service list
+ 
+
+Checkpoint:
+
+
+root@controller:~# openstack volume service list
++------------------+------------+------+---------+-------+----------------------------+
+| Binary           | Host       | Zone | Status  | State | Updated At                 |
++------------------+------------+------+---------+-------+----------------------------+
+| cinder-scheduler | controller | nova | enabled | up    | 2019-07-16T11:58:25.000000 |
+| cinder-volume    | block1@lvm | nova | enabled | up    | 2019-07-16T11:58:19.000000 |
++------------------+------------+------+---------+-------+----------------------------+
+root@controller:~#
+
+
+
+
+
+Installing Swift
+===================== 
+Source Admin Credentials
+. admin-openrc
+Create the Swift User
+openstack user create --domain default --password-prompt swift
+Add the Admin Role
+openstack role add --project service --user swift admin
+ 
+Setting up the Swift Service and Endpoints
+Create the Service
+
+openstack service create --name swift --description "OpenStack Object Storage" object-store
+
+Create the Endpoints
+Public/Internal/Admin
+openstack endpoint create --region RegionOne object-store public http://controller:8080/v1/AUTH_%\(project_id\)s
+openstack endpoint create --region RegionOne object-store internal http://controller:8080/v1/AUTH_%\(project_id\)s
+openstack endpoint create --region RegionOne object-store admin http://controller:8080/v1
+ 
+Install Components
+apt install swift swift-proxy python-swiftclient
+
+Create /etc/swift
+mkdir /etc/swift
+
+Download the Proxy Service config File
+curl -o /etc/swift/proxy-server.conf https://opendev.org/openstack/swift/raw/branch/stable/pike/etc/proxyserver.conf-sample
+
+nano /etc/swift/proxy-server.conf
+
+[DEFAULT]
+bind_port = 8080
+user = swift
+swift_dir = /etc/swift
+[pipeline:main]
+Remove tempurl and tempauth modules and add the authtoken
+and keystoneauth modules
+[app:proxy-server]
+use = egg:swift#proxy
+...
+account_autocreate = True
+[filter:keystoneauth]
+use = egg:swift#keystoneauth
+...
+operator_roles = admin,user
+
+[filter:authtoken]
+paste.filter_factory = keystonemiddleware.auth_token:filter_factory
+...
+auth_uri = http://controller:5000
+auth_url = http://controller:35357
+memcached_servers = controller:11211
+auth_type = password
+project_domain_name = default
+user_domain_name = default
+project_name = service
+username = swift
+password = openstack
+delay_auth_decision = True
+[filter:cache]
+use = egg:swift#memcache
+...
+memcache_servers = controller:11211
+ 
+Installing Swift on the Object Storages Nodes
+================================================
+Install Components
+apt install xfsprogs rsync
+
+Format Devices
+mkfs.xfs /dev/sdb
+mkfs.xfs /dev/sdc
+
+Create the Mount Point Directories
+mkdir -p /srv/node/sdb
+mkdir -p /srv/node/sdc
+
+nano /etc/fstab
+/dev/sdb /srv/node/sdb xfs noatime,nodiratime,nobarrier,logbufs=8 0 2
+/dev/sdc /srv/node/sdc xfs noatime,nodiratime,nobarrier,logbufs=8 0 2
+
+Mount the Devices
+mount /dev/sdb
+mount /dev/sdc
+ 
+nano /etc/rsyncd.conf
+
+uid = swift
+gid = swift
+log file = /var/log/rsyncd.log
+pid file = /var/run/rsyncd.pid
+address = 10.0.0.14
+[account]
+max connections = 2
+path = /srv/node/
+read only = False
+lock file = /var/lock/account.lock
+[container]
+max connections = 2
+path = /srv/node/
+read only = False
+lock file = /var/lock/container.lock
+[object]
+max connections = 2
+path = /srv/node/
+read only = False
+lock file = /var/lock/object.lock
+ 
+RSYNC_ENABLE =true
+Restart rsync
+service rsync restart
+ 
+Installing Swift on the Object Storages Nodes
+=================================================
+Install Components
+apt install swift swift-account swift-container swift-object
+
+Download the Config Files
+curl -o /etc/swift/account-server.conf https://opendev.org/openstack/swift/raw/branch/stable/pike/etc/account-server.conf-sample
+curl -o /etc/swift/container-server.conf https://opendev.org/openstack/swift/raw/branch/stable/pike/etc/container-server.conf-sample
+curl -o /etc/swift/object-server.conf  https://opendev.org/openstack/swift/raw/branch/stable/pike/etc/object-server.conf-sample
+ 
+nano  /etc/swift/account-server.conf
+
+[DEFAULT]
+bind_ip = 10.0.0.14
+bind_port = 6202
+user = swift
+swift_dir = /etc/swift
+devices = /srv/node
+mount_check = True
+[pipeline:main]
+pipeline = healthcheck recon account-server
+[filter:recon]
+use = egg:swift#recon
+...
+recon_cache_path = /var/cache/swift
+ 
+
+nano /etc/swift/container-server.conf
+[DEFAULT]
+bind_ip = 10.0.0.14
+bind_port = 6201
+user = swift
+swift_dir = /etc/swift
+devices = /srv/node
+mount_check = True
+[pipeline:main]
+pipeline = healthcheck recon container-server
+[filter:recon]
+use = egg:swift#recon
+...
+recon_cache_path = /var/cache/swift
+ 
+nano /etc/swift/object-server.conf
+[DEFAULT]
+bind_ip = 10.0.0.14
+bind_port = 6200
+user = swift
+swift_dir = /etc/swift
+devices = /srv/node
+mount_check = True
+[pipeline:main]
+pipeline = healthcheck recon object-server
+[filter:recon]
+use = egg:swift#recon
+...
+
+recon_cache_path = /var/cache/swift
+recon_lock_path = /var/lock
+
+Fix Permissions
+chown swift:swift /srv/node/sdb
+chown swift:swift /srv/node/sdc
+ 
+Create Account Ring on Controller
+Change Directories
+cd /etc/swift
+
+Create Base account.builder File
+Add Each Node and Drive to Ring
+
+swift-ring-builder account.builder create 10 3 1
+
+swift-ring-builder account.builder add --region 1 --zone 1 --ip 10.0.0.14 --port 6202 --device sdb --weight 100
+swift-ring-builder account.builder add --region 1 --zone 1 --ip 10.0.0.14 --port 6202 --device sdc --weight 100
+
+
+Additional Object Storage Nodes:
+swift-ring-builder account.builder add --region 1 --zone 1 --ip 10.0.0.52 --port 6202 --device sdb --weight 100
+swift-ring-builder account.builder add --region 1 --zone 1 --ip 10.0.0.52 --port 6202 --device sdc --weight 100
+
+ 
+Create Account Ring on Controller
+Verify the Ring
+swift-ring-builder account.builder
+
+Rebalance the Ring
+swift-ring-builder account.builder rebalance
+ 
+Create Container Ring on Controller
+Create Base container.builder File
+Add Each Node and Drive to Ring
+
+swift-ring-builder container.builder add --region 1 --zone 1 --ip 10.0.0.14 --port 6201 --device sdb --weight 100
+swift-ring-builder container.builder add --region 1 --zone 1 --ip 10.0.0.14 --port 6201 --device sdc --weight 100
+
+(Additional STorage Node2 ):
+swift-ring-builder container.builder add --region 1 --zone 1 --ip 10.0.0.52 --port 6201 --device sdb --weight 100
+swift-ring-builder container.builder add --region 1 --zone 1 --ip 10.0.0.52 --port 6201 --device sdc --weight 100
+swift-ring-builder container.builder create 10 3 1
+ 
+Verify the Ring
+swift-ring-builder container.builder
+
+
+Rebalance the Ring
+swift-ring-builder container.builder rebalance
+ 
+Create Object Ring on Controller
+Create Base object.builder File
+Add Each Node and Drive to Ring
+swift-ring-builder object.builder add --region 1 --zone 1 --ip 10.0.0.14 --port 6200 --device sdb --weight 100
+swift-ring-builder object.builder add --region 1 --zone 1 --ip 10.0.0.14 --port 6200 --device sdc --weight 100
+
+(Additional Storage Node2)
+swift-ring-builder object.builder add --region 1 --zone 1 --ip 10.0.0.52 --port 6200 --device sdb --weight 100
+swift-ring-builder object.builder add --region 1 --zone 1 --ip 10.0.0.52 --port 6200 --device sdc –weight1 100
+swift-ring-builder object.builder create 10 3 1
+ 
+Verify the Ring
+swift-ring-builder object.builder
+
+Rebalance the Ring
+swift-ring-builder object.builder rebalance
+ 
+Distribute Ring Files
+Accept Keys if Needed
+
+ssh 10.0.0.51
+ssh 10.0.0.52
+
+Distribute the Ring Files
+for x in 10.0.0.51 10.0.0.52 ; 
+do scp *.ring.gz amy@$x:/tmp/;done
+
+Move Ring Files to /etc/swift on Each
+Node
+mv /tmp/*.ring.gz /etc/swift
+ 
+Finalizing Swift
+Obtain swift.conf
+curl -o /etc/swift/swift.conf https://opendev.org/openstack/swift/raw/branch/stable/pike/etc/swift.conf-sample
+
+
+Create 2 Hash Secrets
+openssl rand –hex 6
+
+nano /etc/swift/swift.conf
+[swift-hash]
+...
+swift_hash_path_suffix = HASH_PATH_SUFFIX
+swift_hash_path_prefix = HASH_PATH_PREFIX
+[storage-policy:0]
+...
+name = Policy-0
+default = yes
+ 
+Finalizing Swift
+Distribute swift.conf
+for x in 10.0.0.51 10.0.0.52 ; 
+do scp /etc/swift/swift.conf amy@$x:/tmp/;
+done
+
+Move Ring Files to /etc/swift on Each Node
+mv /tmp/swift.conf /etc/swift
+
+Ensure Proper Ownership
+
+chown -R root:swift /etc/swift
+
+Restart Services on Controller
+service memcached restart
+service swift-proxy restart
+
+Start Services on Object Storage Nodes
+swift-init all start
+ 
+Verifying Installation
+Source Demo Credentials
+. demo-openrc
+Show Status
+swift stat
+
+Create testfile
+echo 'Ericsson Quest for EASY' > testfile
+
+Upload a Test File
+openstack object create container1 testfile
+
+List Files in Container
+openstack object list container1
+
+Download File from Container
+openstack object save container1 testfile
+
+Create Container
+openstack container create container1
+
+

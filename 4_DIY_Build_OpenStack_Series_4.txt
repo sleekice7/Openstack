@@ -1,0 +1,274 @@
+Installing Heat
+================
+Database
+Create heat database:
+mysql
+create database heat;
+Grant access:
+grant all privileges on heat.* to 'heat'@'localhost' identified by 'openstack';
+grant all privileges on heat.* to 'heat'@'%' identified by 'openstack';
+exit
+ 
+Setting up the Heat User
+Source Admin Credentials
+. admin-openrc
+Create the Heat User
+openstack user create --domain default --password-prompt heat
+Add the Admin Role
+openstack role add --project service --user heat admin
+ 
+Setting up the Heat Service and Endpoints
+Create the Service
+openstack service create --name heat --description "Orchestration" orchestration
+openstack service create --name heat-cfn --description "Orchestration" cloudformation
+Create the Endpoints
+Public/Internal/Admin
+openstack endpoint create --region RegionOne orchestration public http://controller:8004/v1/%\(tenant_id\)s
+openstack endpoint create --region RegionOne orchestration internal http://controller:8004/v1/%\(tenant_id\)s
+openstack endpoint create --region RegionOne orchestration admin http://controller:8004/v1/%\(tenant_id\)s
+ 
+Setting up the Heat Service and Endpoints
+Create the Endpoints
+Public/Internal/Admin
+openstack endpoint create --region RegionOne cloudformation public http://controller:8000/v1
+openstack endpoint create --region RegionOne cloudformation internal http://controller:8000/v1
+openstack endpoint create --region RegionOne cloudformation admin http://controller:8000/v1
+ 
+Additional Identity Information
+Create the Heat Domain
+openstack domain create --description "Ericsson OSS Stack projects and users" heat
+Create the heat_domain_user user
+openstack user create --domain heat --password-prompt heat_domain_admin
+Add the Admin Role
+openstack role add --domain heat --user-domain heat --user heat_domain_admin admin
+
+Create the heat_stack_owner role
+openstack role create heat_stack_owner
+Add the heat_stack_owner role
+openstack role add --domain heat --user demo heat_stack_owner
+
+
+
+Install Components
+apt install heat-api heat-api-cfn heat-engine
+
+nano /etc/heat/heat.conf
+[database]
+# …
+connection = mysql+pymysql://heat:openstack@controller/heat
+[DEFAULT]
+transport_url = rabbit://openstack:openstack@controller
+ 
+[keystone_authtoken]
+# …
+auth_uri = http://controller:5000
+auth_url = http://controller:35357
+memcached_servers = controller:11211
+auth_type = password
+project_domain_name = default
+user_domain_name = default
+project_name = service
+username = heat
+password = openstack
+[trustee]
+# …
+auth_type = password
+auth_url = http://controller:35357
+username = heat
+password = openstack
+user_domain_name = default
+ 
+[clients_keystone]
+# …
+auth_uri = http://controller:35357
+[ec2authtoken]
+# …
+auth_uri = http://controller:5000/v3
+[DEFAULT]
+heat_metadata_server_url = http://controller:8000
+heat_waitcondition_server_url = http://controller:8000/v1/waitcondition
+[DEFAULT]
+stack_domain_admin = heat_domain_admin
+stack_domain_admin_password = openstack
+stack_user_domain_name = heat
+ 
+Populate the Database
+su –s /bin/sh –c "heat-manage db_sync" heat
+
+Finalize Installation
+service heat-api restart
+service heat-api-cfn restart
+service heat-engine restart
+ 
+Verify Installation
+Source Credentials
+. admin-openrc
+List Services
+openstack orchestration service list
+ 
+
+Launching an Instance
+======================
+Creating Virtual Networks
+Source Admin Credentials
+. admin-openrc
+
+Create the Network
+====================
+openstack network create --share --provider-physical-network provider \
+--provider-network-type flat provider
+
+Creating a Subnet
+====================
+openstack subnet create --network provider \
+--allocation-pool start=203.0.113.101,end=203.0.113.250 \
+--dns-nameserver 8.8.8.8 --gateway 203.0.113.1 --subnet-range 203.0.113.0/24 provider
+ 
+Creating a flavor
+===================
+Create a m1.nano 
+openstack flavor create --id 0 --vcpus 1 --ram 64 --disk 1 m1.nano
+ 
+Generate a key pair
+=====================
+Source the demo credentials
+. demo-openrc
+Generate the key pair
+ssh-keygen -q -N ""
+Upload the key pair
+openstack keypair create --public-key ~/.ssh/id_rsa.pub mykey
+Verify the key pair
+openstack keypair list
+ 
+Create a security group rule
+==============================
+Add rules to default security group
+openstack security group rule create --proto icmp default
+openstack security group rule create --proto tcp --dst-port 22 default
+ 
+Review Instance Options List available flavors
+openstack flavor list
+
+List available images
+openstack image list
+
+List networks
+openstack network list
+
+List security groups
+openstack security group list
+ 
+
+Create the instance
+======================
+
+PROVIDER_NET_ID = 6af66668-a127-440a-9e93-5039b9bb02c4 (from openstack network list - ID)
+
+openstack server create \
+--flavor m1.nano \
+--image cirros \
+--nic net-id=PROVIDER_NET_ID \
+--security-group default \
+--key-name mykey \
+provider-instance
+
+openstack server create \
+--flavor m1.nano \
+--image cirros \
+--nic net-id=bd341c3f-1a87-413c-8667-ca953dbad290 \
+--security-group default \
+--key-name mykey \
+ericsson-instance
+
+
+========== slax instance ===============
+. demo-openrc
+
+openstack server create \
+--flavor m1.nano \
+--image tinycore \
+--nic net-id=6af66668-a127-440a-9e93-5039b9bb02c4 \
+--security-group default \
+--key-name tinykey \
+tinycore-instance
+
+Check the status of your instance 
+openstack server list
+ 
+
+Managing Swift ACLs
+======================== 
+Controlling Read Access
+HTTP refererheader can read container contents:
+-r ".r:*"
+HTTP refererheader can read and list container
+contents:
+-r ".r:*,.rlistings"
+A list of specific HTTP referer headers permitted to
+read container contents:
+-r ".r:openstack.example.com,.r:swift.example.com"
+A list of specific HTTP refererheaders denied read
+access:
+-r ".r:*,.r:-openstack.example.com,.r:-swift.example.com"
+ 
+
+All users residing in project1 can read container
+contents:
+-r "project1:*"
+user1 from project1 can read container contents:
+-r "project1:user1"
+A list of specific users and projects permitted to
+read container contents:
+-r "project1:user1,project1:user2,project3:*"
+ 
+Controlling Write Access
+All users residing in project1 can write to the
+container:
+-w "project1:*"
+user1 from project1 can write to the container:
+-w "project1:user1"
+A list of specific users and projects permitted to
+write to the container:
+-w "project1:user1,project1:user2,project3:*"
+ 
+Expiring Objects
+Set an object to expire at an absolute time (in Unix time). You can get the current Unix time by running
+date +'%s'.:
+-H "X-Delete-At:UNIX_TIME"
+Set an object to expire after a relative amount of time (in seconds):
+-H "X-Delete-After:SECONDS"
+If you no longer want to expire the object, you can remove the X-Delete-At header:
+-H "X-Remove-Delete-At:"
+ 
+  
+OpenStack Pike on Ubuntu
+Managing Policies
+===================
+Example Policies
+less /etc/cinder/policy.json
+Rules:
+"admin_or_owner": "is_admin:True or (role:admin and
+is_admin_project:True) or project_id:%(project_id)s",
+"default": "rule:admin_or_owner",
+"admin_api": "is_admin:True or (role:admin and
+is_admin_project:True)",
+Policies:
+"volume:create": "",
+"volume:create_from_image": "",
+"volume:delete": "rule:admin_or_owner",
+"volume:force_delete": "rule:admin_api",
+"volume:get": "rule:admin_or_owner",
+ 
+Managing Policies
+Restart Service
+systemctl restart openstack-cinder-api.service
+systemctl restart openstack-cinder-scheduler.service
+NOTE: The Lab is running on CentOS, but our installation is
+Ubuntu. If you want to change policies and restart Cinder on
+Ubuntu, use the following:
+service cinder-scheduler restart
+service apache2 restart
+nano/etc/cinder/policy.json
+"volume:create": "rule:admin_or_owner",
+
+

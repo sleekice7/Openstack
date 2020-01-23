@@ -1,0 +1,535 @@
+Pre-Requisites:
+===================
+To Enable Virtualization :
+PowerShell (Admin mode) 
+Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V –All
+bcdedit /set hypervisorlaunchtype off
+Verify Hypervisorlaunchtype (status : off)
+Disable Hyper-V  > 
+(Windows key) > Turn windows features on or off > (Uncheck ) Hyper-V checkbox
+
+sudo apt-get install openssh-server
+sudo su - #switch to root
+passwd 
+vi /etc/ssh/sshd_config (PermitRootLogin yes)
+service sshd restart
+
+====================================
+Step 1: Create 4 VMs
+====================================
+VM1: Creating our Controller
+=========================
+Controller Node Networking
+/etc/network/interfaces
+auto enp0s8
+iface enp0s8 inet static
+address 10.0.0.9
+netmask 255.255.255.0
+auto enp0s9
+iface enp0s9 inet static
+address 203.0.113.9
+netmask 255.255.255.0
+
+
+Controller Node Hosts File
+/etc/hosts
+10.0.0.9 controller
+203.0.113.9 controller-api
+
+10.0.0.10 compute
+203.0.113.10 compute-api
+
+10.0.0.41 block1
+10.0.0.51 object1
+10.0.0.52 object2
+ 
+========================================================
+VM2: Creating our Compute
+=====================
+Compute Node Networking
+/etc/network/interfaces
+auto enp0s8
+iface enp0s8 inet static
+address 10.0.0.10
+netmask 255.255.255.0
+auto enp0s9
+iface enp0s9 inet static
+address 203.0.113.10
+netmask 255.255.255.0
+ 
+Compute Node Hosts File
+/etc/hosts
+10.0.0.9 controller
+203.0.113.9 controller-api
+10.0.0.10 compute
+203.0.113.10 compute-api
+
+10.0.0.41 block1
+10.0.0.51 object1
+10.0.0.52 object2
+ 
+ 
+=================================================================================================
+Prepping the Environment
+============================ 
+Configuring NTP
+Controller Node
+apt install chrony
+nano /etc/chrony/chrony.conf
+allow 10.0.0.0/24
+service chrony restart
+Other Nodes
+apt install chrony
+nano /etc/chrony/chrony.conf
+#pool 2.debian.pool.ntp.org offline iburst
+
+server controller iburst
+service chrony restart
+chronyc sources
+
+Verify All Nodes
+=============================== 
+OpenStack Packages (All Nodes)
+===============================
+apt install software-properties-common
+add-apt-repository cloud-archive:pike
+add-apt-repository cloud-archive:pike-updates
+apt update && apt dist-upgrade
+apt install python-openstackclient
+============================================
+
+@Controller:: Installing the Database
+=========================================
+apt install mariadb-server python-pymysql
+touch /etc/mysql/mariadb.conf.d/99-openstack.cnf
+[mysqld]
+bind-address = 10.0.0.9
+default-storage-engine = innodb
+innodb_file_per_table = on
+max_connections = 4096
+collation-server = utf8_general_ci
+character-set-server = utf8
+
+service mysql restart
+mysql_secure_installation
+ 
+@Controller: Installing the Message Queue
+============================================
+apt install rabbitmq-server
+rabbitmqctl add_user openstack openstack
+rabbitmqctl set_permissions openstack ".*" ".*" ".*"
+ 
+@Controller: Installing Memcached
+Controller
+apt install memcached python-memcache
+nano /etc/memcached.conf
+#-l 127.0.0.1
+-l 10.0.0.9
+service memcached restart
+   
+@Controller: Installing Keystone
+================================= 
+Database
+Update python-pyasn1:
+apt install python-pyasn1
+Create Keystone database:
+mysql
+create database keystone;
+Grant access:
+grant all privileges on keystone.* to 'keystone'@'localhost' identified by 'openstack';
+grant all privileges on keystone.* to 'keystone'@'%' identified by 'openstack';
+exit
+ 
+Install Components
+
+apt install keystone apache2 libapache2-mod-wsgi
+nano /etc/keystone/keystone.conf
+[database]
+# …
+connection = mysql+pymysql://keystone:openstack@controller/keystone
+[token]
+# …
+provider = fernet
+su -s /bin/sh -c "keystone-manage db_sync" keystone
+
+Populate the database
+Initialize Fernet key repositories
+keystone-manage fernet_setup --keystone-user keystone --keystone-group keystone
+keystone-manage credential_setup --keystone-user keystone --keystone-group keystone
+
+Bootstrap Identity Service
+keystone-manage bootstrap --bootstrap-password openstack \
+--bootstrap-admin-url http://controller:35357/v3/ \
+--bootstrap-internal-url http://controller:5000/v3/ \
+--bootstrap-public-url http://controller:5000/v3/ \
+--bootstrap-region-id RegionOne
+
+Configure Apache
+nano /etc/apache2/apache2.conf:
+ServerName controller
+
+Restart Apache:
+service apache2 restart
+
+
+Creating Projects, Users and Roles
+Set Credentials
+export OS_USERNAME=admin
+export OS_PASSWORD=openstack
+export OS_PROJECT_NAME=admin
+export OS_USER_DOMAIN_NAME=Default
+export OS_PROJECT_DOMAIN_NAME=Default
+export OS_AUTH_URL=http://controller:35357/v3
+export OS_IDENTITY_API_VERSION=3
+
+Create Base Project
+Service Project:
+openstack project create --domain default --description "Service Project" service
+Demo Project:
+openstack project create --domain default --description "Ericsson Cloud Project" demo
+ 
+Creating Projects, Users and Roles
+Create the demo user
+openstack user create --domain default --password-prompt demo
+Create the user role
+openstack role create user
+Add the user role
+openstack role add --project demo --user demo user
+ 
+Verify Installation
+Disable Temporary Auth
+nano /etc/keystone/keystone-paste.ini:
+Remove admin_token_auth from:
+[pipeline:public_api]
+[pipeline:admin_api]
+[pipeline:api_v3]
+Unset Environment Variables
+unset OS_AUTH_URL OS_PASSWORD
+ 
+Verify Installation
+Request Token
+Admin / Demo
+openstack --os-auth-url http://controller:35357/v3 --os-project-domain-name Default --os-user-domain-name Default --os-project-name admin --os-username admin token issue
+openstack --os-auth-url http://controller:5000/v3 --os-project-domain-name Default --os-user-domain-name Default --os-project-name demo --os-username demo token issue
+ 
+Create Credential Files
+nano admin-openrc
+export OS_USERNAME=admin
+export OS_PASSWORD=openstack
+export OS_PROJECT_NAME=admin
+export OS_USER_DOMAIN_NAME=Default
+export OS_PROJECT_DOMAIN_NAME=Default
+export OS_AUTH_URL=http://controller:35357/v3
+export OS_IDENTITY_API_VERSION=3
+export OS_IMAGE_API_VERSION=2
+
+nano demo-openrc
+export OS_USERNAME=demo
+export OS_PASSWORD=openstack
+export OS_PROJECT_NAME=demo
+export OS_USER_DOMAIN_NAME=Default
+export OS_PROJECT_DOMAIN_NAME=Default
+export OS_AUTH_URL=http://controller:5000/v3
+export OS_IDENTITY_API_VERSION=3
+export OS_IMAGE_API_VERSION=2
+ 
+Using the Credentials Files
+Using admin-openrc
+. admin-openrc
+openstack token issue
+Using demo-openrc
+. demo-openrc
+openstack token issue
+ 
+@Controller: Installing Glance (DB + PKGs + CONFIG)
+===================================================
+Database
+Create Glance Database:
+mysql
+create database glance;
+Grant Access:
+grant all privileges on glance.* to 'glance'@'localhost' identified by 'openstack';
+grant all privileges on glance.* to 'glance'@'%' identified by 'openstack';
+exit
+ 
+Setting up the Glance user
+Source Admin Credentials
+. admin-openrc
+Create the Glance User
+openstack user create --domain default --password-prompt glance
+Add the Admin Role
+openstack role add --project service --user glance admin
+ 
+Setting up the Glance Service and Endpoints
+Create the Service
+openstack service create --name glance --description "OpenStack Imaging" image
+
+Create the Endpoints
+Public/Internal/Admin
+openstack endpoint create --region RegionOne image public http://controller:9292
+openstack endpoint create --region RegionOne image internal http://controller:9292
+openstack endpoint create --region RegionOne image admin http://controller:9292
+ 
+Install Components
+apt install glance
+nano /etc/glance/glance-api.conf
+[database]
+# …
+connection = mysql+pymysql://glance:openstack@controller/glance
+[keystone_authtoken]
+# …
+auth_uri = http://controller:5000
+auth_url = http://controller:35357
+memcached_servers = controller:11211
+auth_type = password
+project_domain_name = default
+user_domain_name = default
+project_name = service
+username = glance
+password = openstack
+ 
+[paste_deploy]
+# …
+flavor = keystone
+[glance_store]
+# …
+stores = file,http
+default_store = file
+filesystem_store_directory = /var/lib/glance/images
+ 
+Configure Glance
+nano /etc/glance/glance-registry.conf
+[database]
+# …
+connection = mysql+pymsql://glance:openstack@controller/glance
+[keystone_authtoken]
+# …
+auth_uri = http://controller:5000
+auth_url = http://controller:35357
+memcached_servers = controller:11211
+auth_type = password
+project_domain_name = default
+user_domain_name = default
+project_name = service
+username = glance
+password = openstack
+[paste_deploy]
+# ...
+flavor = keystone
+ 
+Populate the Database
+su -s /bin/sh -c "glance-manage db_sync" glance
+
+Finalize Installation
+service glance-registry restart
+service glance-api restart
+ 
+Verify Glance Installation
+=============================
+. admin-openrc
+
+Upload Image
+wget http://download.cirros-cloud.net/0.3.5/cirros-0.3.5-x86_64-disk.img
+openstack image create \
+--file cirros-0.3.5-x86_64-disk.img \
+--disk-format qcow2 \
+–-container-format bare
+--public cirros
+
+List Image
+openstack image list
+    
+@Controller: Installing Nova (DB + PKG + CONFIG)
+=================================================
+Database
+Create Nova databases:
+mysql
+create database nova_api;
+create database nova;
+create database nova_cell0;
+Grant access:
+grant all privileges on nova_api.* to 'nova'@'localhost' identified by 'openstack';
+grant all privileges on nova_api.* to 'nova'@'%' identified by 'openstack';
+grant all privileges on nova.* to 'nova'@'localhost' identified by 'openstack';
+grant all privileges on nova.* to 'nova'@'%' identified by 'openstack';
+grant all privileges on nova_cell0.* to 'nova'@'localhost' identified by 'openstack';
+grant all privileges on nova_cell0.* to 'nova'@'%' identified by 'openstack';
+exit
+ 
+Setting up the Nova User
+Source Admin Credentials
+. admin-openrc
+Create the Nova User
+openstack user create --domain default --password-prompt nova
+Add the Admin Role
+openstack role add --project service --user nova admin
+
+Setting up the Nova Service and Endpoints
+Create the Service
+openstack service create --name nova --description "OpenStack Compute" compute
+
+Create the Endpoints 
+Public/Internal/Admin
+openstack endpoint create --region RegionOne compute public http://controller:8774/v2.1
+openstack endpoint create --region RegionOne compute internal http://controller:8774/v2.1
+openstack endpoint create --region RegionOne compute admin http://controller:8774/v2.1
+ 
+Setting up the Placement User
+Create the Placement User
+openstack user create --domain default --password-prompt placement
+Add the Admin Role
+openstack role add --project service --user placement admin
+ 
+Setting up the Placement Service and Endpoints
+Create the Service
+openstack service create --name placement --description "Placement API" placement
+
+Create the Endpoints
+Public/Internal/Admin
+openstack endpoint create --region RegionOne placement public http://controller:8778
+openstack endpoint create --region RegionOne placement internal http://controller:8778
+openstack endpoint create --region RegionOne placement admin http://controller:8778
+ 
+Install Components
+apt install nova-api nova-conductor nova-consoleauth nova-novncproxy 
+apt install nova-scheduler nova-placement-api
+
+nano /etc/nova/nova.conf
+[api_database]
+connection = mysql+pymysql://nova:openstack@controller/nova_api
+[database]
+connection = mysql+pymysql://nova:openstack@controller/nova
+[DEFAULT]
+transport_url = rabbit://openstack:openstack@controller
+[api]
+auth_strategy = keystone
+ 
+[keystone_authtoken]
+auth_uri = http://controller:5000
+auth_url = http://controller:35357
+memcached_servers = controller:11211
+auth_type = password
+project_domain_name = default
+user_domain_name = default
+project_name = service
+username = nova
+password = openstack
+[DEFAULT]
+my_ip = 10.0.0.6
+[DEFAULT]
+#log_dir
+[DEFAULT]
+use_neutron = True
+firewall_driver = nova.virt.firewall.NoopFirewallDriver
+ 
+[vnc]
+enabled = true
+vncserver_listen = $my_ip
+vncserver_proxyclient_address = $my_ip
+[glance]
+api_servers = http://controller:9292
+[oslo_concurrency]
+lock_path = /var/lib/nova/tmp
+[placement]
+auth_url = http://controller:35357/v3
+os_region_name=RegionOne
+auth_type = password
+project_domain_name = default
+user_domain_name = default
+project_name = service
+username = placement
+password = openstack
+ 
+Populate the nova-apidatabase
+su -s /bin/sh -c "nova-manage api_db sync" nova
+
+Finalize Installation
+
+service nova-api restart
+service nova-consoleauth restart
+service nova-scheduler restart
+service nova-conductor restart
+service nova-novncproxy restart
+
+Register the cell0 databases
+su -s /bin/sh -c "nova-manage cell_v2 map_cell0" nova
+
+Create the cell1 cell
+su -s /bin/sh -c "nova-manage cell_v2 create_cell --name=cell1 --verbose" nova
+
+Populate the Nova Database
+su -s /bin/sh -c "nova-manage db sync" nova
+================================================================================================================== 
+@Compute: Installing a compute node
+======================================
+Install Components
+apt install nova-compute
+
+nano /etc/nova/nova.conf
+[DEFAULT]
+transport_url = rabbit://openstack:openstack@controller
+[api]
+auth_strategy = keystone
+ 
+[keystone_authtoken]
+auth_uri = http://controller:5000
+auth_url = http://controller:35357
+memcached_servers = controller:11211
+auth_type = password
+project_domain_name = default
+user_domain_name = default
+project_name = service
+username = nova
+password = openstack
+[DEFAULT]
+my_ip = 10.0.0.9
+[DEFAULT]
+#log_dir
+[DEFAULT]
+use_neutron = True
+firewall_driver = nova.virt.firewall.NoopFirewallDrive
+
+[vnc]
+enabled = true
+vncserver_listen = 0.0.0.0
+vncserver_proxyclient_address = $my_ip
+[glance]
+api_servers = http://controller:9292
+[oslo_concurrency]
+lock_path = /var/lib/nova/tmp
+[placement]
+auth_url = http://controller:35357/v3
+os_region_name=RegionOne
+auth_type = password
+project_domain_name = default
+user_domain_name = default
+project_name = service
+username = placement
+password = openstack
+ 
+Check Compute Node Support Acceleration
+egrep -c '(vmx|svm)' /proc/cpuinfo
+nano/etc/nova/nova-compute.conf
+[libvirt]
+# ...
+virt_type = qemu
+
+Restart Compute Service
+service nova-compute restart
+=========================================================================== 
+@Controller: Add Compute to Cell Database 
+===========================================
+Source Admin Credentials
+. admin-openrc
+
+List Compute Services
+openstack compute service list
+
+Discover Compute Hosts
+su -s /bin/sh -c "nova-manage cell_v2 discover_hosts --verbose" nova
+
+Populate the Nova Database
+su -s /bin/sh -c "nova-manage db sync" nova
+ 
+Verifying Installation NOVA / List Services & Endpoints
+openstack catalog list
